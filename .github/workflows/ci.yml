@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -31,12 +31,6 @@ jobs:
             receiver/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('receiver/Cargo.lock', 'receiver/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libasound2-dev libfontconfig1-dev libwayland-dev libxkbcommon-dev
 
       - name: Build (release)
         working-directory: receiver
