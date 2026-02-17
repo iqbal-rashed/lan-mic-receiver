@@ -20,12 +20,24 @@ use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 
+// ---------------------------------------------------------------------------
+// Signaling message format — matches the iOS sender's flat JSON schema:
+//   SDP:  {"type":"offer"|"answer", "sdp":"v=0..."}
+//   ICE:  {"type":"ice", "candidate":"...", "sdpMid":"0", "sdpMLineIndex":0}
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "lowercase")]
-enum SignalMessage {
-    Sdp(RTCSessionDescription),
-    Ice(RTCIceCandidateInit),
-    Ping,
+struct SignalMessage {
+    #[serde(rename = "type")]
+    msg_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sdpMid")]
+    sdp_mid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sdpMLineIndex")]
+    sdp_mline_index: Option<i32>,
 }
 
 pub async fn run(
@@ -39,6 +51,25 @@ pub async fn run(
     let pc =
         create_peer_connection(use_stun, shared.clone(), queue.clone(), out_tx.clone()).await?;
     shared.set_pc_state(Some("created".into()));
+
+    // --- Create SDP offer and send to sender ---
+    let offer = pc.create_offer(None).await?;
+    pc.set_local_description(offer).await?;
+
+    if let Some(local_desc) = pc.local_description().await {
+        shared.log_line(format!("Created SDP offer ({:?}), sending to sender", local_desc.sdp_type));
+        let msg = SignalMessage {
+            msg_type: "offer".to_string(),
+            sdp: Some(local_desc.sdp),
+            candidate: None,
+            sdp_mid: None,
+            sdp_mline_index: None,
+        };
+        let txt = serde_json::to_string(&msg)?;
+        if socket.send(Message::Text(txt)).await.is_err() {
+            return Err(anyhow!("Failed to send offer over WebSocket"));
+        }
+    }
 
     // Pending ICE candidates that arrive before remote description
     let pending_ice: Arc<tokio::sync::Mutex<Vec<RTCIceCandidateInit>>> =
@@ -58,31 +89,61 @@ pub async fn run(
                     Message::Text(txt) => {
                         let parsed: Result<SignalMessage, _> = serde_json::from_str(&txt);
                         match parsed {
-                            Ok(SignalMessage::Sdp(desc)) => {
-                                shared.log_line(format!("Got SDP: {:?}", desc.sdp_type));
-                                pc.set_remote_description(desc).await?;
-                                // Apply pending ICE
-                                let mut pend = pending_ice.lock().await;
-                                for c in pend.drain(..) {
-                                    let _ = pc.add_ice_candidate(c).await;
-                                }
+                            Ok(signal) => {
+                                match signal.msg_type.as_str() {
+                                    "offer" | "answer" => {
+                                        if let Some(sdp_str) = signal.sdp {
+                                            let is_offer = signal.msg_type == "offer";
+                                            shared.log_line(format!("Got SDP: {}", signal.msg_type));
+                                            let desc = if is_offer {
+                                                RTCSessionDescription::offer(sdp_str).map_err(|e| anyhow!("parse offer: {e}"))?
+                                            } else {
+                                                RTCSessionDescription::answer(sdp_str).map_err(|e| anyhow!("parse answer: {e}"))?
+                                            };
+                                            pc.set_remote_description(desc).await?;
 
-                                // If remote was an offer, answer it
-                                let answer = pc.create_answer(None).await?;
-                                pc.set_local_description(answer).await?;
-                                if let Some(local) = pc.local_description().await {
-                                    let _ = out_tx.send(SignalMessage::Sdp(local));
+                                            // Apply pending ICE candidates
+                                            let mut pend = pending_ice.lock().await;
+                                            for c in pend.drain(..) {
+                                                let _ = pc.add_ice_candidate(c).await;
+                                            }
+
+                                            // If remote was an offer, create an answer.
+                                            if is_offer {
+                                                let answer = pc.create_answer(None).await?;
+                                                pc.set_local_description(answer).await?;
+                                                if let Some(local) = pc.local_description().await {
+                                                    let _ = out_tx.send(SignalMessage {
+                                                        msg_type: "answer".to_string(),
+                                                        sdp: Some(local.sdp),
+                                                        candidate: None,
+                                                        sdp_mid: None,
+                                                        sdp_mline_index: None,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "ice" => {
+                                        if let Some(candidate_str) = signal.candidate {
+                                            let init = RTCIceCandidateInit {
+                                                candidate: candidate_str,
+                                                sdp_mid: Some(signal.sdp_mid.unwrap_or_default()),
+                                                sdp_mline_index: Some(signal.sdp_mline_index.unwrap_or(0) as u16),
+                                                username_fragment: Some(String::new()),
+                                            };
+                                            if pc.remote_description().await.is_none() {
+                                                pending_ice.lock().await.push(init);
+                                            } else {
+                                                let _ = pc.add_ice_candidate(init).await;
+                                            }
+                                        }
+                                    }
+                                    "ping" => { /* ignore */ }
+                                    other => {
+                                        shared.log_line(format!("Unknown message type: {other}"));
+                                    }
                                 }
-                            }
-                            Ok(SignalMessage::Ice(cand)) => {
-                                if pc.remote_description().await.is_none() {
-                                    pending_ice.lock().await.push(cand);
-                                } else {
-                                    let _ = pc.add_ice_candidate(cand).await;
-                                }
-                            }
-                            Ok(SignalMessage::Ping) => {
-                                // ignore
                             }
                             Err(e) => {
                                 shared.log_line(format!("Bad signaling message: {e}"));
@@ -167,14 +228,20 @@ async fn create_peer_connection(
         })
     }));
 
-    // Trickle ICE out to the sender
+    // Trickle ICE out to the sender (flat JSON format)
     let ice_tx = out_tx.clone();
     pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
         let ice_tx = ice_tx.clone();
         Box::pin(async move {
             if let Some(c) = c {
                 if let Ok(init) = c.to_json() {
-                    let _ = ice_tx.send(SignalMessage::Ice(init));
+                    let _ = ice_tx.send(SignalMessage {
+                        msg_type: "ice".to_string(),
+                        sdp: None,
+                        candidate: Some(init.candidate),
+                        sdp_mid: init.sdp_mid,
+                        sdp_mline_index: init.sdp_mline_index.map(|v| v as i32),
+                    });
                 }
             }
         })

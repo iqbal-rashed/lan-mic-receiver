@@ -14,6 +14,9 @@ pub enum CoreCommand {
         use_stun: bool,
     },
     Stop,
+    ChangeOutputDevice {
+        device_name: Option<String>,
+    },
 }
 
 pub struct CoreController {
@@ -120,8 +123,8 @@ impl SharedStatus {
 
 struct Running {
     server: signaling::ServerHandle,
-    _audio: audio::AudioOutput,
-    _queue: Arc<ArrayQueue<i16>>,
+    audio: audio::AudioOutput,
+    queue: Arc<ArrayQueue<i16>>,
 }
 
 pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
@@ -173,7 +176,7 @@ pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
                                         shared.set_ws_url(Some(server.ws_url.clone()));
                                         shared.log_line(format!("Signaling server listening on {}", server.bind_addr));
                                         shared.log_line(format!("WebSocket URL: {}", server.ws_url));
-                                        running = Some(Running { server, _audio: audio_out, _queue: queue });
+                                        running = Some(Running { server, audio: audio_out, queue });
                                     }
                                     Err(e) => {
                                         shared.set_last_error(Some(e.to_string()));
@@ -199,6 +202,23 @@ pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
                         shared.set_client_connected(false);
                         shared.set_pc_state(None);
                         shared.log_line("Stopped.");
+                    }
+                    CoreCommand::ChangeOutputDevice { device_name } => {
+                        if let Some(ref mut r) = running {
+                            match audio::AudioOutput::start(device_name.as_deref(), Arc::clone(&r.queue)) {
+                                Ok(new_audio) => {
+                                    shared.log_line(format!(
+                                        "Audio output switched to: {}",
+                                        new_audio.device_name()
+                                    ));
+                                    r.audio = new_audio;
+                                }
+                                Err(e) => {
+                                    shared.set_last_error(Some(e.to_string()));
+                                    shared.log_line(format!("Failed to switch audio: {e}"));
+                                }
+                            }
+                        }
                     }
                 }
             }

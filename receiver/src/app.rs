@@ -72,7 +72,13 @@ impl App {
                 Task::none()
             }
             Message::OutputDeviceChanged(device) => {
-                self.selected_output = Some(device);
+                self.selected_output = Some(device.clone());
+                // Live-switch if server is already running
+                if self.status.server_running {
+                    let _ = self.controller.send(CoreCommand::ChangeOutputDevice {
+                        device_name: Some(device),
+                    });
+                }
                 Task::none()
             }
             Message::RefreshDevices => {
