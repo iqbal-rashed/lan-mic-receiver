@@ -3,6 +3,8 @@
 **/*.rs.bk
 Cargo.lock
 
+
+
 # IDEs
 .idea/
 .vscode/
@@ -18,4 +20,6 @@ Thumbs.db
 # Debug
 *.pdb
 
+# AI
 .claude
+.agent

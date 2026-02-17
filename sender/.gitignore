@@ -1,0 +1,16 @@
+# Xcode / iOS
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.hmap
+*.moved-aside
+*.pbxuser
+*.perspectivev3
+!default.pbxuser
+!default.perspectivev3
