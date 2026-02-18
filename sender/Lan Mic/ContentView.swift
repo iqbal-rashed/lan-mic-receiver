@@ -2,7 +2,7 @@
 //  ContentView.swift
 //  Lan Mic
 //
-//  Main SwiftUI view — connection controls, live status, and help.
+//  Main SwiftUI view — auto-discovery, connection controls, live status, and help.
 //
 
 import SwiftUI
@@ -14,6 +14,7 @@ struct ContentView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
+                    discoveryCard
                     connectionCard
                     controlsCard
                     statusCard
@@ -28,6 +29,87 @@ struct ContentView: View {
             .navigationTitle("LAN Mic")
         }
         .navigationViewStyle(.stack)
+        .onAppear {
+            vm.startDiscovery()
+        }
+        .onDisappear {
+            vm.stopDiscovery()
+        }
+    }
+
+    // MARK: - Discovery Card
+
+    private var discoveryCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Label("Receivers", systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.headline)
+                Spacer()
+                if vm.discovery.isSearching {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                }
+            }
+
+            if vm.discovery.receivers.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                    Text(vm.discovery.isSearching ? "Scanning for receivers…" : "No receivers found")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+            } else {
+                ForEach(vm.discovery.receivers) { receiver in
+                    Button {
+                        vm.selectReceiver(receiver)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "desktopcomputer")
+                                .foregroundColor(.blue)
+                                .font(.title3)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(receiver.name)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.primary)
+
+                                if receiver.isResolving {
+                                    Text("Resolving…")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else if !receiver.host.isEmpty {
+                                    Text("\(receiver.host):\(receiver.port)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .monospaced()
+                                }
+                            }
+
+                            Spacer()
+
+                            if receiver.host == vm.ip && "\(receiver.port)" == vm.port {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                            } else {
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.secondary)
+                                    .font(.caption)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .cornerRadius(16)
     }
 
     // MARK: - Connection Card
@@ -117,12 +199,24 @@ struct ContentView: View {
                 .font(.headline)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Connection state
+            // Connection state with pulse animation
             HStack {
                 Circle()
                     .fill(colorForState(vm.state))
                     .frame(width: 12, height: 12)
                     .shadow(color: colorForState(vm.state).opacity(0.6), radius: 4)
+                    .overlay(
+                        Circle()
+                            .stroke(colorForState(vm.state).opacity(0.3), lineWidth: 2)
+                            .scaleEffect(vm.state == .connected ? 2.0 : 1.0)
+                            .opacity(vm.state == .connected ? 0 : 1)
+                            .animation(
+                                vm.state == .connected
+                                    ? .easeOut(duration: 1.2).repeatForever(autoreverses: false)
+                                    : .default,
+                                value: vm.state == .connected
+                            )
+                    )
                 Text(vm.state.rawValue)
                     .fontWeight(.medium)
                 Spacer()
@@ -171,9 +265,10 @@ struct ContentView: View {
             Label("Help", systemImage: "questionmark.circle")
                 .font(.headline)
 
-            Text("1. Start the Windows Rust receiver on your PC")
-            Text("2. Make sure it's listening on the specified port")
-            Text("3. Enter your PC's LAN IP and press Connect")
+            Text("1. Start the receiver app on your PC")
+            Text("2. Both devices must be on the same WiFi")
+            Text("3. The receiver should appear above automatically")
+            Text("4. Or enter the PC's IP manually and press Connect")
 
             HStack(spacing: 4) {
                 Image(systemName: "link")

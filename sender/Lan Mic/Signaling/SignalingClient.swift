@@ -4,9 +4,11 @@
 //
 //  WebSocket signaling client using URLSessionWebSocketTask.
 //  Exchanges offer/answer/ICE JSON with the Windows receiver.
+//  Includes keepalive ping and exponential-backoff reconnect.
 //
 
 import Foundation
+import os.log
 
 // MARK: - Delegate
 
@@ -36,6 +38,7 @@ final class SignalingClient: NSObject {
     private var webSocket: URLSessionWebSocketTask?
     private var session: URLSession?
     private var isConnected = false
+    private let logger = Logger(subsystem: "com.lanmic.app", category: "Signaling")
 
     // Reconnect
     var autoReconnect = false
@@ -44,6 +47,10 @@ final class SignalingClient: NSObject {
     private var reconnectURL: URL?
     private var reconnectWorkItem: DispatchWorkItem?
 
+    // Keepalive
+    private var pingTimer: Timer?
+    private static let pingInterval: TimeInterval = 10.0
+
     // MARK: - Connect / Disconnect
 
     func connect(to url: URL) {
@@ -51,22 +58,17 @@ final class SignalingClient: NSObject {
         reconnectURL = url
         reconnectAttempt = 0
 
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = false
-        session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
-        webSocket = session?.webSocketTask(with: url)
-        webSocket?.resume()
-        listenForMessages()
+        openConnection(to: url)
     }
 
     func disconnect() {
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         autoReconnect = false // Stop reconnect attempts on explicit disconnect
+        stopPingTimer()
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
-        session?.invalidateAndCancel()
-        session = nil
+        invalidateSession()
         isConnected = false
     }
 
@@ -91,12 +93,12 @@ final class SignalingClient: NSObject {
         guard let data = try? JSONEncoder().encode(message),
               let text = String(data: data, encoding: .utf8)
         else {
-            print("[Signaling] Failed to encode message")
+            logger.error("Failed to encode signaling message")
             return
         }
-        webSocket?.send(.string(text)) { error in
+        webSocket?.send(.string(text)) { [weak self] error in
             if let error {
-                print("[Signaling] Send error: \(error.localizedDescription)")
+                self?.logger.error("Send error: \(error.localizedDescription)")
             }
         }
     }
@@ -120,7 +122,7 @@ final class SignalingClient: NSObject {
                 }
                 self.listenForMessages() // Continue listening
             case .failure(let error):
-                print("[Signaling] Receive error: \(error.localizedDescription)")
+                self.logger.error("Receive error: \(error.localizedDescription)")
                 self.handleDisconnect(error: error)
             }
         }
@@ -130,7 +132,7 @@ final class SignalingClient: NSObject {
         guard let data = text.data(using: .utf8),
               let msg = try? JSONDecoder().decode(SignalingMessage.self, from: data)
         else {
-            print("[Signaling] Failed to parse message: \(text)")
+            logger.warning("Failed to parse message: \(text.prefix(200))")
             return
         }
 
@@ -148,8 +150,51 @@ final class SignalingClient: NSObject {
                 delegate?.signaling(self, didReceiveICE: candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex)
             }
         default:
-            print("[Signaling] Unknown message type: \(msg.type)")
+            logger.warning("Unknown message type: \(msg.type)")
         }
+    }
+
+    // MARK: - Keepalive Ping
+
+    private func startPingTimer() {
+        stopPingTimer()
+        pingTimer = Timer.scheduledTimer(withTimeInterval: Self.pingInterval, repeats: true) { [weak self] _ in
+            self?.sendPing()
+        }
+    }
+
+    private func stopPingTimer() {
+        pingTimer?.invalidate()
+        pingTimer = nil
+    }
+
+    private func sendPing() {
+        webSocket?.sendPing { [weak self] error in
+            if let error {
+                self?.logger.warning("Ping failed: \(error.localizedDescription)")
+                self?.handleDisconnect(error: error)
+            }
+        }
+    }
+
+    // MARK: - Internal session management
+
+    private func invalidateSession() {
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    private func openConnection(to url: URL) {
+        // Always clean up previous session to avoid leaks
+        invalidateSession()
+
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = 10
+        session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+        webSocket = session?.webSocketTask(with: url)
+        webSocket?.resume()
+        listenForMessages()
     }
 
     // MARK: - Disconnect / Reconnect
@@ -158,6 +203,7 @@ final class SignalingClient: NSObject {
         guard isConnected || webSocket != nil else { return }
         isConnected = false
         webSocket = nil
+        stopPingTimer()
         delegate?.signalingDidDisconnect(self, error: error)
         attemptReconnect()
     }
@@ -166,16 +212,11 @@ final class SignalingClient: NSObject {
         guard autoReconnect, let url = reconnectURL else { return }
         reconnectAttempt += 1
         let delay = min(pow(2.0, Double(reconnectAttempt - 1)) * 0.5, maxBackoff)
-        print("[Signaling] Reconnecting in \(delay)s (attempt \(reconnectAttempt))")
+        logger.info("Reconnecting in \(delay)s (attempt \(self.reconnectAttempt))")
 
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.autoReconnect else { return }
-            let config = URLSessionConfiguration.default
-            config.waitsForConnectivity = false
-            self.session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
-            self.webSocket = self.session?.webSocketTask(with: url)
-            self.webSocket?.resume()
-            self.listenForMessages()
+            self.openConnection(to: url)
         }
         reconnectWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
@@ -190,9 +231,10 @@ extension SignalingClient: URLSessionWebSocketDelegate {
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
     ) {
-        print("[Signaling] WebSocket connected")
+        logger.info("WebSocket connected")
         isConnected = true
         reconnectAttempt = 0
+        startPingTimer()
         delegate?.signalingDidConnect(self)
     }
 
@@ -202,7 +244,7 @@ extension SignalingClient: URLSessionWebSocketDelegate {
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason: Data?
     ) {
-        print("[Signaling] WebSocket closed: \(closeCode.rawValue)")
+        logger.info("WebSocket closed: \(closeCode.rawValue)")
         handleDisconnect(error: nil)
     }
 
@@ -212,7 +254,7 @@ extension SignalingClient: URLSessionWebSocketDelegate {
         didCompleteWithError error: Error?
     ) {
         if let error {
-            print("[Signaling] Task failed: \(error.localizedDescription)")
+            logger.error("Task failed: \(error.localizedDescription)")
             handleDisconnect(error: error)
         }
     }

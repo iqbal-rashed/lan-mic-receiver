@@ -4,10 +4,12 @@
 //
 //  Manages RTCPeerConnection for audio-only WebRTC streaming.
 //  Creates local audio track from microphone and handles ICE/SDP negotiation.
+//  Optimised for audio-only: no video encoder/decoder factories.
 //
 
 import Foundation
 import WebRTC
+import os.log
 
 // MARK: - Delegate
 
@@ -23,13 +25,14 @@ protocol WebRTCManagerDelegate: AnyObject {
 final class WebRTCManager: NSObject {
     weak var delegate: WebRTCManagerDelegate?
 
+    private let logger = Logger(subsystem: "com.lanmic.app", category: "WebRTC")
+
+    // Audio-only factory — no video codecs needed, saves memory
     private static let factory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
-        let encoderFactory = RTCDefaultVideoEncoderFactory()
-        let decoderFactory = RTCDefaultVideoDecoderFactory()
         return RTCPeerConnectionFactory(
-            encoderFactory: encoderFactory,
-            decoderFactory: decoderFactory
+            encoderFactory: RTCAudioEncoderFactory(),
+            decoderFactory: RTCAudioDecoderFactory()
         )
     }()
 
@@ -42,6 +45,9 @@ final class WebRTCManager: NSObject {
     // MARK: - Setup
 
     func createPeerConnection() {
+        // Clean up any existing connection first
+        close()
+
         let config = RTCConfiguration()
 
         // LAN-only: empty ICE servers
@@ -60,15 +66,18 @@ final class WebRTCManager: NSObject {
             optionalConstraints: nil
         )
 
-        let pc = WebRTCManager.factory.peerConnection(
+        guard let pc = WebRTCManager.factory.peerConnection(
             with: config,
             constraints: constraints,
             delegate: self
-        )
+        ) else {
+            logger.error("Failed to create peer connection")
+            return
+        }
 
         peerConnection = pc
         addLocalAudioTrack()
-        print("[WebRTC] Peer connection created")
+        logger.info("Peer connection created")
     }
 
     private func addLocalAudioTrack() {
@@ -88,24 +97,34 @@ final class WebRTCManager: NSObject {
 
         peerConnection?.add(audioTrack, streamIds: ["stream0"])
         localAudioTrack = audioTrack
-        print("[WebRTC] Local audio track added")
+        logger.info("Local audio track added")
     }
 
     // MARK: - SDP Negotiation
 
     func setRemoteOffer(_ sdp: String, completion: @escaping (Error?) -> Void) {
+        guard let pc = peerConnection else {
+            completion(NSError(domain: "WebRTCManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No peer connection"]))
+            return
+        }
+
         let sessionDescription = RTCSessionDescription(type: .offer, sdp: sdp)
-        peerConnection?.setRemoteDescription(sessionDescription) { error in
+        pc.setRemoteDescription(sessionDescription) { [weak self] error in
             if let error {
-                print("[WebRTC] setRemoteDescription error: \(error.localizedDescription)")
+                self?.logger.error("setRemoteDescription error: \(error.localizedDescription)")
             } else {
-                print("[WebRTC] Remote offer set")
+                self?.logger.info("Remote offer set")
             }
             completion(error)
         }
     }
 
     func createAnswer(completion: @escaping (String?, Error?) -> Void) {
+        guard let pc = peerConnection else {
+            completion(nil, NSError(domain: "WebRTCManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "No peer connection"]))
+            return
+        }
+
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: [
                 kRTCMediaConstraintsOfferToReceiveAudio: kRTCMediaConstraintsValueTrue,
@@ -114,18 +133,18 @@ final class WebRTCManager: NSObject {
             optionalConstraints: nil
         )
 
-        peerConnection?.answer(for: constraints) { [weak self] answer, error in
+        pc.answer(for: constraints) { [weak self] answer, error in
             guard let self, let answer else {
                 completion(nil, error)
                 return
             }
 
-            self.peerConnection?.setLocalDescription(answer) { error in
+            self.peerConnection?.setLocalDescription(answer) { [weak self] error in
                 if let error {
-                    print("[WebRTC] setLocalDescription error: \(error.localizedDescription)")
+                    self?.logger.error("setLocalDescription error: \(error.localizedDescription)")
                     completion(nil, error)
                 } else {
-                    print("[WebRTC] Local answer set")
+                    self?.logger.info("Local answer set")
                     completion(answer.sdp, nil)
                 }
             }
@@ -140,14 +159,21 @@ final class WebRTCManager: NSObject {
             sdpMLineIndex: sdpMLineIndex ?? 0,
             sdpMid: sdpMid
         )
-        guard let pc = peerConnection else { return }
+        guard let pc = peerConnection else {
+            logger.warning("addICECandidate called but no peer connection exists")
+            return
+        }
         pc.add(iceCandidate)
     }
 
     // MARK: - Stats
 
     func getStats(completion: @escaping (_ packetsSent: Int) -> Void) {
-        peerConnection?.statistics { report in
+        guard let pc = peerConnection else {
+            completion(0)
+            return
+        }
+        pc.statistics { report in
             var totalPackets = 0
             for (_, stats) in report.statistics {
                 if stats.type == "outbound-rtp" {
@@ -166,11 +192,29 @@ final class WebRTCManager: NSObject {
     // MARK: - Teardown
 
     func close() {
+        if let track = localAudioTrack {
+            track.isEnabled = false
+            // Remove the track from the peer connection senders
+            if let pc = peerConnection {
+                for sender in pc.senders {
+                    if sender.track?.trackId == track.trackId {
+                        pc.removeTrack(sender)
+                    }
+                }
+            }
+        }
+        localAudioTrack = nil
+        peerConnection?.close()
+        peerConnection = nil
+        logger.info("Peer connection closed")
+    }
+
+    deinit {
+        // Safety: ensure cleanup even if close() was not called
         localAudioTrack?.isEnabled = false
         localAudioTrack = nil
         peerConnection?.close()
         peerConnection = nil
-        print("[WebRTC] Peer connection closed")
     }
 }
 
@@ -178,46 +222,60 @@ final class WebRTCManager: NSObject {
 
 extension WebRTCManager: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {
-        print("[WebRTC] Signaling state: \(stateChanged.rawValue)")
+        logger.debug("Signaling state: \(String(describing: stateChanged))")
         delegate?.webRTCManager(self, didChangeSignalingState: stateChanged)
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
-        print("[WebRTC] Remote stream added")
+        logger.info("Remote stream added")
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {
-        print("[WebRTC] Remote stream removed")
+        logger.info("Remote stream removed")
     }
 
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {
-        print("[WebRTC] Negotiation needed")
+        logger.debug("Negotiation needed")
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
-        print("[WebRTC] ICE connection state: \(newState.rawValue)")
+        logger.debug("ICE connection state: \(String(describing: newState))")
         delegate?.webRTCManager(self, didChangeICEState: newState)
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
-        print("[WebRTC] ICE gathering state: \(newState.rawValue)")
+        logger.debug("ICE gathering state: \(String(describing: newState))")
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
-        print("[WebRTC] ICE candidate generated: \(candidate.sdp)")
+        logger.debug("ICE candidate generated")
         delegate?.webRTCManager(self, didGenerateICECandidate: candidate)
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {
-        print("[WebRTC] ICE candidates removed")
+        logger.debug("ICE candidates removed")
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
-        print("[WebRTC] Data channel opened")
+        logger.info("Data channel opened")
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCPeerConnectionState) {
-        print("[WebRTC] Connection state: \(stateChanged.rawValue)")
+        logger.info("Connection state: \(String(describing: stateChanged))")
         delegate?.webRTCManager(self, didChangeConnectionState: stateChanged)
     }
+}
+
+// MARK: - Audio-only factory stubs
+
+/// Minimal encoder factory for audio-only (avoids loading video codecs)
+private class RTCAudioEncoderFactory: NSObject, RTCVideoEncoderFactory {
+    func createEncoder(_ info: RTCVideoCodecInfo) -> (any RTCVideoEncoder)? { nil }
+    func supportedCodecs() -> [RTCVideoCodecInfo] { [] }
+}
+
+/// Minimal decoder factory for audio-only (avoids loading video codecs)
+private class RTCAudioDecoderFactory: NSObject, RTCVideoDecoderFactory {
+    func createDecoder(_ info: RTCVideoCodecInfo) -> (any RTCVideoDecoder)? { nil }
+    func supportedCodecs() -> [RTCVideoCodecInfo] { [] }
 }
