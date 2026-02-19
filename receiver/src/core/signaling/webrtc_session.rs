@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -49,11 +50,19 @@ pub async fn run(
     queue: Arc<ArrayQueue<i16>>,
     use_stun: bool,
     shared: SharedStatus,
+    server_cancel: CancellationToken,
 ) -> Result<()> {
     let (out_tx, mut out_rx) = mpsc::channel::<SignalMessage>(SIGNAL_CHANNEL_SIZE);
+    let cancel_token = CancellationToken::new();
 
-    let pc =
-        create_peer_connection(use_stun, shared.clone(), queue.clone(), out_tx.clone()).await?;
+    let pc = create_peer_connection(
+        use_stun,
+        shared.clone(),
+        queue.clone(),
+        out_tx.clone(),
+        cancel_token.clone(),
+    )
+    .await?;
     shared.set_pc_state(Some("created".into()));
 
     // --- Create SDP offer and send to sender ---
@@ -96,6 +105,10 @@ pub async fn run(
                     Message::Text(txt) => {
                         match serde_json::from_str::<SignalMessage>(&txt) {
                             Ok(signal) => {
+                                if signal.msg_type == "bye" {
+                                    shared.log_line("Received bye from sender — stopping.");
+                                    break;
+                                }
                                 handle_signal_message(
                                     &signal, &pc, &out_tx, &pending_ice, &shared,
                                 ).await?;
@@ -122,8 +135,17 @@ pub async fn run(
                     break;
                 }
             }
+
+            // Server shutdown — receiver clicked STOP
+            _ = server_cancel.cancelled() => {
+                shared.log_line("Server shutting down — stopping session.");
+                break;
+            }
         }
     }
+
+    // Cancel all spawned tasks (audio decode loop, etc.)
+    cancel_token.cancel();
 
     shared.log_line("Closing PeerConnection…");
     pc.close().await?;
@@ -208,6 +230,7 @@ async fn create_peer_connection(
     shared: SharedStatus,
     queue: Arc<ArrayQueue<i16>>,
     out_tx: mpsc::Sender<SignalMessage>,
+    cancel_token: CancellationToken,
 ) -> Result<Arc<webrtc::peer_connection::RTCPeerConnection>> {
     // Media engine + codecs
     let mut m = MediaEngine::default();
@@ -284,6 +307,7 @@ async fn create_peer_connection(
     pc.on_track(Box::new(move |track, _receiver, _transceiver| {
         let queue = queue.clone();
         let shared_track = shared_track.clone();
+        let token = cancel_token.clone();
 
         Box::pin(async move {
             if track.kind() != RTPCodecType::Audio {
@@ -297,7 +321,8 @@ async fn create_peer_connection(
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    decode_track_to_queue(track, queue, channels, shared_track.clone()).await
+                    decode_track_to_queue(track, queue, channels, shared_track.clone(), token)
+                        .await
                 {
                     shared_track.log_line(format!("Audio decode stopped: {e}"));
                 }
@@ -313,6 +338,7 @@ async fn decode_track_to_queue(
     queue: Arc<ArrayQueue<i16>>,
     channels: usize,
     shared: SharedStatus,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
     let opus_channels = if channels >= 2 {
         Channels::Stereo
@@ -331,10 +357,15 @@ async fn decode_track_to_queue(
     let mut last_log = std::time::Instant::now();
 
     loop {
-        let (rtp, _attr) = track
-            .read_rtp()
-            .await
-            .map_err(|e| anyhow!("read_rtp: {e}"))?;
+        let (rtp, _attr) = tokio::select! {
+            result = track.read_rtp() => {
+                result.map_err(|e| anyhow!("read_rtp: {e}"))?
+            }
+            _ = cancel_token.cancelled() => {
+                shared.log_line("Audio decode cancelled.");
+                return Ok(());
+            }
+        };
         shared.bump_audio_packets(1);
 
         if rtp.payload.is_empty() {

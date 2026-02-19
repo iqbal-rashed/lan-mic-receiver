@@ -6,6 +6,7 @@ use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Maximum log lines retained in memory.
 const MAX_LOG_LINES: usize = 1500;
@@ -141,7 +142,6 @@ impl SharedStatus {
     fn reset_connection(&self) {
         let mut s = self.inner.lock();
         s.server_running = false;
-        s.ws_url = None;
         s.client_connected = false;
         s.client_addr = None;
         s.pc_state = None;
@@ -153,9 +153,10 @@ impl SharedStatus {
 // ---------------------------------------------------------------------------
 
 struct Running {
-    server: signaling::ServerHandle,
     audio: audio::AudioOutput,
     queue: Arc<ArrayQueue<i16>>,
+    _session_cancel: CancellationToken,
+    mdns: Option<signaling::MdnsRegistration>,
 }
 
 pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
@@ -178,20 +179,43 @@ pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
         };
 
         rt.block_on(async move {
+            // Start the HTTP server immediately so the web sender page is always available
+            let http_server = match signaling::start_http_server(
+                "0.0.0.0:9001".to_string(),
+                shared.clone(),
+            )
+            .await
+            {
+                Ok(server) => {
+                    shared.set_ws_url(Some(server.ws_url.clone()));
+                    shared.log_line(format!(
+                        "Web sender available at http://{}",
+                        server.bind_addr
+                    ));
+                    server
+                }
+                Err(e) => {
+                    shared.set_last_error(Some(e.to_string()));
+                    shared.log_line(format!("Failed to start HTTP server: {e}"));
+                    return;
+                }
+            };
+
             let mut running: Option<Running> = None;
 
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     CoreCommand::Start {
-                        bind_addr,
+                        bind_addr: _,
                         output_device,
                         use_stun,
                     } => {
                         // Stop any existing run first
                         if let Some(r) = running.take() {
-                            shared.log_line("Stopping previous server…");
-                            if let Err(e) = r.server.shutdown().await {
-                                log::warn!("Server shutdown error: {e}");
+                            shared.log_line("Stopping previous session…");
+                            http_server.deactivate().await;
+                            if let Some(mdns) = r.mdns {
+                                mdns.shutdown();
                             }
                             shared.set_server_running(false);
                         }
@@ -212,53 +236,46 @@ pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
                                     audio_out.device_name()
                                 ));
 
-                                // Start signaling + WebRTC server
-                                match signaling::start_server(
-                                    bind_addr.clone(),
-                                    Arc::clone(&queue),
-                                    use_stun,
-                                    shared.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(server) => {
-                                        shared.set_server_running(true);
-                                        shared.set_ws_url(Some(server.ws_url.clone()));
-                                        shared.log_line(format!(
-                                            "Signaling server listening on {}",
-                                            server.bind_addr
-                                        ));
-                                        shared.log_line(format!(
-                                            "WebSocket URL: {}",
-                                            server.ws_url
-                                        ));
-                                        running = Some(Running {
-                                            server,
-                                            audio: audio_out,
-                                            queue,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        shared.set_last_error(Some(e.to_string()));
-                                        shared.log_line(format!(
-                                            "Failed to start server: {e}"
-                                        ));
-                                        shared.set_server_running(false);
-                                        shared.set_ws_url(None);
-                                    }
-                                }
+                                // Activate WebSocket connections on the already-running server
+                                let session_cancel = http_server
+                                    .activate(Arc::clone(&queue), use_stun)
+                                    .await;
+
+                                // Register mDNS for auto-discovery
+                                let mdns =
+                                    signaling::MdnsRegistration::register(9001, &shared);
+
+                                shared.set_server_running(true);
+                                shared.log_line(format!(
+                                    "Listening on {}",
+                                    http_server.bind_addr
+                                ));
+                                shared.log_line(format!(
+                                    "WebSocket URL: {}",
+                                    http_server.ws_url
+                                ));
+
+                                running = Some(Running {
+                                    audio: audio_out,
+                                    queue,
+                                    _session_cancel: session_cancel,
+                                    mdns,
+                                });
                             }
                             Err(e) => {
                                 shared.set_last_error(Some(e.to_string()));
-                                shared.log_line(format!("Failed to start audio output: {e}"));
+                                shared.log_line(format!(
+                                    "Failed to start audio output: {e}"
+                                ));
                             }
                         }
                     }
                     CoreCommand::Stop => {
                         if let Some(r) = running.take() {
                             shared.log_line("Stopping…");
-                            if let Err(e) = r.server.shutdown().await {
-                                log::warn!("Server shutdown error: {e}");
+                            http_server.deactivate().await;
+                            if let Some(mdns) = r.mdns {
+                                mdns.shutdown();
                             }
                         }
                         shared.reset_connection();
@@ -266,6 +283,27 @@ pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
                     }
                     CoreCommand::ChangeOutputDevice { device_name } => {
                         if let Some(ref mut r) = running {
+                            let old_device = r.audio.device_name().to_string();
+                            shared.log_line(format!(
+                                "Switching audio from '{old_device}'…"
+                            ));
+
+                            // Drop old stream to stop its cpal callback
+                            let queue_ref = Arc::clone(&r.queue);
+                            let old_audio = std::mem::replace(
+                                &mut r.audio,
+                                audio::AudioOutput::stopped(),
+                            );
+                            drop(old_audio);
+
+                            // Brief pause for cpal callback thread to stop
+                            tokio::time::sleep(std::time::Duration::from_millis(50))
+                                .await;
+
+                            // Drain stale samples
+                            while queue_ref.pop().is_some() {}
+
+                            // Start new stream on the selected device
                             match audio::AudioOutput::start(
                                 device_name.as_deref(),
                                 Arc::clone(&r.queue),
@@ -279,7 +317,18 @@ pub fn spawn_runtime(shared: SharedStatus) -> CoreController {
                                 }
                                 Err(e) => {
                                     shared.set_last_error(Some(e.to_string()));
-                                    shared.log_line(format!("Failed to switch audio: {e}"));
+                                    shared.log_line(format!(
+                                        "Failed to switch audio: {e}"
+                                    ));
+                                    if let Ok(fallback) = audio::AudioOutput::start(
+                                        Some(&old_device),
+                                        Arc::clone(&r.queue),
+                                    ) {
+                                        shared.log_line(
+                                            "Reverted to previous audio device",
+                                        );
+                                        r.audio = fallback;
+                                    }
                                 }
                             }
                         }

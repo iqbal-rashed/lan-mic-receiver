@@ -5,12 +5,15 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "qr_code"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.36", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-util = "0.7"
 axum = { version = "0.7", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rcgen = "0.13"
 futures-util = "0.3"
 webrtc = "0.17.1"
 cpal = "0.15"
@@ -24,3 +27,4 @@ tray-icon = "0.19"
 image = "0.25"
 mdns-sd = { version = "0.12", features = ["async"] }
 gethostname = "0.5"
+rustls = { version = "0.23", features = ["ring"] }

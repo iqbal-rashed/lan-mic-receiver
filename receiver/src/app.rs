@@ -7,8 +7,8 @@ use crate::TrayMessage;
 use cpal::traits::{DeviceTrait, HostTrait};
 use iced::{
     widget::{
-        button, checkbox, column, container, horizontal_space, pick_list, row, scrollable, text,
-        text_input, vertical_space,
+        button, checkbox, column, container, horizontal_space, pick_list, qr_code, row,
+        scrollable, text, text_input, vertical_space,
     },
     Alignment, Border, Color, Element, Length, Shadow, Subscription, Task, Theme,
 };
@@ -58,7 +58,7 @@ pub fn launch_app(
         .subscription(App::subscription)
         .theme(|_| Theme::Dark)
         .window(iced::window::Settings {
-            size: iced::Size::new(400.0, 580.0),
+            size: iced::Size::new(400.0, 600.0),
             resizable: false,
             icon: win_icon,
             exit_on_close_request: false,
@@ -77,6 +77,8 @@ pub fn launch_app(
                     active_view: ActiveView::Main,
                     status,
                     pulse_phase: 0.0,
+                    qr_data: None,
+                    qr_url: None,
                     tray_rx,
                     window_id: None,
                 },
@@ -96,6 +98,7 @@ enum ActiveView {
     Main,
     Settings,
     Logs,
+    QrCode,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +110,8 @@ enum Message {
     StartServer,
     StopServer,
     Navigate(ActiveView),
+    OpenQr,
+    CloseQr,
     Tick,
     Tray(TrayMessage),
     GotWindowId(Option<iced::window::Id>),
@@ -127,6 +132,10 @@ struct App {
     active_view: ActiveView,
     status: StatusSnapshot,
     pulse_phase: f32,
+
+    // QR code
+    qr_data: Option<qr_code::Data>,
+    qr_url: Option<String>,
 
     // Window & Tray
     window_id: Option<iced::window::Id>,
@@ -173,6 +182,9 @@ impl App {
                     use_stun: self.use_stun,
                 }) {
                     log::warn!("Failed to send Start: {e}");
+                } else {
+                    // Auto-open QR code on start
+                    self.active_view = ActiveView::QrCode;
                 }
                 Task::none()
             }
@@ -186,9 +198,34 @@ impl App {
                 self.active_view = view;
                 Task::none()
             }
+            Message::OpenQr => {
+                self.active_view = ActiveView::QrCode;
+                Task::none()
+            }
+            Message::CloseQr => {
+                self.active_view = ActiveView::Main;
+                Task::none()
+            }
             Message::Tick => {
                 self.status = self.shared.snapshot();
                 self.pulse_phase = (self.pulse_phase + 0.08) % (2.0 * std::f32::consts::PI);
+
+                // Regenerate QR code when the URL changes
+                let current_url = self.status.ws_url.as_ref().map(|ws| {
+                    if ws.starts_with("wss://") {
+                         // Convert wss://ip:port/ws -> https://ip:port
+                        format!("https://{}", ws.trim_start_matches("wss://").trim_end_matches("/ws"))
+                    } else {
+                        // Convert ws://ip:port/ws -> http://ip:port
+                        format!("http://{}", ws.trim_start_matches("ws://").trim_end_matches("/ws"))
+                    }
+                });
+                let http_url = current_url;
+                if http_url != self.qr_url {
+                    self.qr_url = http_url.clone();
+                    self.qr_data = http_url
+                        .and_then(|url| qr_code::Data::new(url).ok());
+                }
 
                 // Poll tray messages (non-blocking)
                 if let Ok(msg) = self.tray_rx.try_recv() {
@@ -257,6 +294,7 @@ impl App {
             ActiveView::Main => self.main_view(),
             ActiveView::Settings => self.settings_view(),
             ActiveView::Logs => self.logs_view(),
+            ActiveView::QrCode => self.qr_view(),
         };
 
         container(content)
@@ -279,7 +317,6 @@ impl App {
         let connection = container(self.connection_hero())
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_x(Alignment::Center)
             .align_y(Alignment::Center);
 
         let cards = self.info_cards();
@@ -438,6 +475,76 @@ impl App {
         .align_x(Alignment::Center)
         .spacing(8)
         .into()
+    }
+
+    // =======================================================================
+    // QR Code Card
+    // =======================================================================
+
+
+    // =======================================================================
+    // QR Code View (Modal-like)
+    // =======================================================================
+
+    fn qr_view(&self) -> Element<'_, Message> {
+        let content = match (&self.qr_data, &self.qr_url) {
+            (Some(data), Some(url)) => {
+                let qr = container(
+                    qr_code(data)
+                        .cell_size(6)
+                        .style(|_| qr_code::Style {
+                            background: Color::WHITE,
+                            cell: Color::from_rgb(0.06, 0.07, 0.09),
+                        }),
+                )
+                .padding(20)
+                .style(|_| container::Style {
+                    background: Some(Color::WHITE.into()),
+                    border: Border {
+                        color: Color::TRANSPARENT,
+                        width: 0.0,
+                        radius: 16.0.into(),
+                    },
+                    ..Default::default()
+                });
+
+                let url_label = text(url.as_str())
+                    .size(16)
+                    .font(iced::Font::MONOSPACE)
+                    .style(|_| text::Style {
+                        color: Some(TEXT_SECONDARY),
+                    });
+
+                let instructions = text("Scan with your phone to open the web sender")
+                    .size(14)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .style(|_| text::Style {
+                        color: Some(TEXT_TERTIARY),
+                    });
+
+                let close_btn = button(text("Close").size(14))
+                    .on_press(Message::CloseQr)
+                    .padding([10, 24])
+                    .style(ghost_button_style);
+
+                column![qr, vertical_space().height(20), url_label, instructions, vertical_space().height(20), close_btn]
+                    .spacing(12)
+                    .align_x(Alignment::Center)
+            }
+            _ => column![
+                text("Starting server…").size(14),
+                button("Close").on_press(Message::CloseQr)
+            ]
+            .spacing(20)
+            .align_x(Alignment::Center),
+        };
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into()
     }
 
     // =======================================================================
@@ -638,19 +745,31 @@ impl App {
             }
             Some(target) => {
                 // Action button on the right
-                row![
-                    title_text,
-                    horizontal_space(),
-                    button(text(nav_label).size(16).style(|_| text::Style {
-                        color: Some(TEXT_SECONDARY),
-                    }))
-                    .on_press(Message::Navigate(target))
-                    .style(ghost_button_style)
-                    .padding([6, 10]),
-                ]
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .into()
+                let settings_btn = button(text(nav_label).size(16).style(|_| text::Style {
+                    color: Some(TEXT_SECONDARY),
+                }))
+                .on_press(Message::Navigate(target))
+                .style(ghost_button_style)
+                .padding([6, 10]);
+
+                let mut row_content = row![title_text, horizontal_space()];
+
+                // Add QR button if we are on the main screen (indicated by "Settings" label)
+                if nav_label == "Settings" {
+                    row_content = row_content.push(
+                        button(text("QR").size(14).style(|_| text::Style {
+                            color: Some(TEXT_SECONDARY),
+                        }))
+                        .on_press(Message::OpenQr)
+                        .style(ghost_button_style)
+                        .padding([6, 10]),
+                    );
+                }
+
+                row_content.push(settings_btn)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill)
+                    .into()
             }
             None => {
                 row![title_text]

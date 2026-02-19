@@ -8,6 +8,7 @@
 
 import Network
 import Foundation
+import Combine
 import os.log
 
 // MARK: - Discovered Receiver
@@ -208,7 +209,7 @@ final class ReceiverDiscovery: ObservableObject {
             }
 
         default:
-            logger.warning("Unexpected resolved endpoint type: \(endpoint)")
+            logger.warning("Unexpected resolved endpoint type: \(String(describing: endpoint))")
         }
     }
 

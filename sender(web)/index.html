@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>LAN Mic</title>
+  <meta name="description" content="Stream your microphone over your local network">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'] },
+        },
+      },
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet">
+  <style>
+    /* Custom animations */
+    @keyframes float {
+
+      0%,
+      100% {
+        transform: translateY(0)
+      }
+
+      50% {
+        transform: translateY(-6px)
+      }
+    }
+
+    @keyframes ripple {
+      0% {
+        transform: scale(1);
+        opacity: .5
+      }
+
+      100% {
+        transform: scale(1.8);
+        opacity: 0
+      }
+    }
+
+    @keyframes spin-slow {
+      to {
+        transform: rotate(360deg)
+      }
+    }
+
+    @keyframes wave {
+
+      0%,
+      100% {
+        height: 20%
+      }
+
+      50% {
+        height: 80%
+      }
+    }
+
+    .anim-float {
+      animation: float 3s ease-in-out infinite;
+    }
+
+    .anim-ripple {
+      animation: ripple 2s ease-out infinite;
+    }
+
+    .anim-spin-slow {
+      animation: spin-slow 8s linear infinite;
+    }
+
+    /* Glassmorphism card */
+    .glass {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+
+    /* Wave bars */
+    .wave-bar {
+      animation: wave 0.8s ease-in-out infinite;
+      transform-origin: bottom;
+    }
+
+    /* Select arrow */
+    select {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+    }
+  </style>
+</head>
+
+<body class="bg-[#0a0a0f] text-white font-sans antialiased h-full overflow-hidden select-none">
+
+  <!-- Ambient background blobs -->
+  <div class="fixed inset-0 overflow-hidden pointer-events-none">
+    <div class="absolute -top-40 -right-40 w-96 h-96 rounded-full bg-violet-600/10 blur-[120px]"></div>
+    <div class="absolute -bottom-40 -left-40 w-96 h-96 rounded-full bg-sky-600/10 blur-[120px]"></div>
+  </div>
+
+  <div id="app" class="relative z-10 flex flex-col h-[100dvh] max-w-md mx-auto px-5 py-6">
+
+    <!-- Permission banner -->
+    <div id="permBanner"
+      class="hidden glass rounded-xl px-4 py-3 text-sm text-red-400 text-center mb-4 border-red-500/20">
+      ⚠ Microphone access denied. Allow mic access in browser settings.
+    </div>
+
+    <!-- Header -->
+    <header class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-500 to-sky-400 flex items-center justify-center">
+          <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 10v2a7 7 0 01-14 0v-2m7 9v3m-4 0h8" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-base font-bold tracking-tight">LAN Mic</h1>
+          <p class="text-[11px] text-gray-500 -mt-0.5">Stream audio to receiver</p>
+        </div>
+      </div>
+      <button onclick="openLogs()"
+        class="w-8 h-8 rounded-lg glass flex items-center justify-center text-gray-400 hover:text-white transition-colors"
+        title="Logs">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h10" />
+        </svg>
+      </button>
+    </header>
+
+    <!-- Main hero area -->
+    <div class="flex-1 flex flex-col items-center justify-center">
+
+      <!-- Mic visualization container -->
+      <div class="relative mb-8">
+        <!-- Outer glow ring (animated when connected) -->
+        <div id="outerRing" class="absolute -inset-4 rounded-full transition-all duration-700"
+          style="background: transparent;"></div>
+
+        <!-- Ripple effect (when connected) -->
+        <div id="ripple1" class="hidden absolute -inset-2 rounded-full border border-emerald-400/30"></div>
+        <div id="ripple2" class="hidden absolute -inset-2 rounded-full border border-emerald-400/20"
+          style="animation-delay:1s"></div>
+
+        <!-- Main button -->
+        <button id="mainBtn" onclick="toggleConnection()"
+          class="relative w-36 h-36 rounded-full flex flex-col items-center justify-center gap-1.5 cursor-pointer transition-all duration-500 ease-out active:scale-95 disabled:cursor-not-allowed disabled:opacity-60 group"
+          style="background: linear-gradient(145deg, rgba(139,92,246,0.15), rgba(56,189,248,0.1)); border: 1.5px solid rgba(139,92,246,0.3);">
+
+          <!-- Mic icon -->
+          <div id="btnIcon">
+            <svg class="w-8 h-8 text-violet-400 group-hover:text-violet-300 transition-colors" fill="none"
+              stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 10v2a7 7 0 01-14 0v-2" />
+              <path stroke-linecap="round" d="M12 19v3" />
+            </svg>
+          </div>
+
+          <!-- Wave bars (shown when connected) -->
+          <div id="waveBars" class="hidden flex items-end gap-[3px] h-8">
+            <div class="wave-bar w-[3px] rounded-full bg-emerald-400" style="animation-delay:0s"></div>
+            <div class="wave-bar w-[3px] rounded-full bg-emerald-400" style="animation-delay:0.15s"></div>
+            <div class="wave-bar w-[3px] rounded-full bg-emerald-400" style="animation-delay:0.3s"></div>
+            <div class="wave-bar w-[3px] rounded-full bg-emerald-400" style="animation-delay:0.45s"></div>
+            <div class="wave-bar w-[3px] rounded-full bg-emerald-400" style="animation-delay:0.1s"></div>
+          </div>
+
+          <span id="btnLabel"
+            class="text-[11px] font-semibold tracking-[0.2em] uppercase text-violet-400/80">Start</span>
+        </button>
+      </div>
+
+      <!-- Status badge -->
+      <div id="statusBadge" class="flex items-center gap-2 px-4 py-1.5 rounded-full glass mb-3">
+        <span id="statusDot" class="w-1.5 h-1.5 rounded-full bg-gray-600 transition-colors duration-300"></span>
+        <span id="statusText" class="text-xs font-medium text-gray-500">Disconnected</span>
+      </div>
+
+      <!-- Volume meter -->
+      <div id="meterWrap" class="w-48 h-1 rounded-full overflow-hidden opacity-0 transition-opacity duration-500"
+        style="background: rgba(255,255,255,0.05);">
+        <div id="meterBar" class="h-full w-0 rounded-full transition-[width] duration-75 ease-out"
+          style="background: linear-gradient(90deg, #8b5cf6, #38bdf8);"></div>
+      </div>
+    </div>
+
+    <!-- Bottom cards -->
+    <div class="space-y-2.5 mt-auto">
+
+      <!-- Duration -->
+      <div class="glass rounded-2xl px-5 py-3.5 flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-7 h-7 rounded-lg bg-violet-500/10 flex items-center justify-center">
+            <svg class="w-3.5 h-3.5 text-violet-400" fill="none" stroke="currentColor" stroke-width="2"
+              viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+          </div>
+          <span class="text-xs text-gray-400 font-medium">Duration</span>
+        </div>
+        <span id="duration" class="text-lg font-bold tabular-nums text-white/90">0:00</span>
+      </div>
+
+      <!-- Input device -->
+      <div class="glass rounded-2xl px-5 py-3.5">
+        <div class="flex items-center gap-2.5 mb-2.5">
+          <div class="w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
+            <svg class="w-3.5 h-3.5 text-sky-400" fill="none" stroke="currentColor" stroke-width="2"
+              viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 10v2a7 7 0 01-14 0v-2" />
+            </svg>
+          </div>
+          <span class="text-xs text-gray-400 font-medium">Input Device</span>
+        </div>
+        <select id="micSelect" onchange="switchMic()"
+          class="w-full bg-white/[0.03] border border-white/[0.06] rounded-xl text-white/80 text-sm px-3 py-2.5 outline-none cursor-pointer appearance-none focus:border-violet-500/40 transition-colors pr-8">
+          <option value="">Default microphone</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="text-center pt-4 text-[10px] text-gray-600">LAN Mic v1.0</div>
+  </div>
+
+  <!-- Logs overlay -->
+  <div id="logOverlay" class="hidden fixed inset-0 bg-[#0a0a0f]/95 backdrop-blur-sm z-50 flex-col">
+    <div class="max-w-md mx-auto w-full flex flex-col h-full px-5 py-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-base font-bold">Activity Log</h2>
+        <button onclick="closeLogs()"
+          class="px-3 py-1.5 rounded-lg glass text-gray-400 hover:text-white text-xs font-medium transition-colors">←
+          Back</button>
+      </div>
+      <div id="logContent"
+        class="flex-1 glass rounded-2xl p-4 overflow-y-auto font-mono text-[10px] leading-5 text-gray-500 whitespace-pre-wrap break-all">
+        Waiting for activity…</div>
+    </div>
+  </div>
+
+  <script>
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+    let state = 'idle';
+    let ws = null, pc = null, localStream = null;
+    let audioCtx = null, analyser = null, meterRAF = null;
+    let connectTime = null, durationTimer = null;
+    let logs = [], keepaliveInterval = null;
+
+    const $ = id => document.getElementById(id);
+
+    // -----------------------------------------------------------------------
+    // Logging
+    // -----------------------------------------------------------------------
+    function log(msg) {
+      const ts = new Date().toLocaleTimeString();
+      const line = `[${ts}] ${msg}`;
+      logs.push(line);
+      if (logs.length > 300) logs.shift();
+      console.log(line);
+      const el = $('logContent');
+      if (el) { el.textContent = logs.join('\n'); el.scrollTop = el.scrollHeight; }
+    }
+    function openLogs() { $('logOverlay').classList.remove('hidden'); $('logOverlay').classList.add('flex'); }
+    function closeLogs() { $('logOverlay').classList.add('hidden'); $('logOverlay').classList.remove('flex'); }
+
+    // -----------------------------------------------------------------------
+    // UI state machine
+    // -----------------------------------------------------------------------
+    function setState(s) {
+      state = s;
+      const btn = $('mainBtn');
+      const dot = $('statusDot');
+      const txt = $('statusText');
+      const meter = $('meterWrap');
+      const icon = $('btnIcon');
+      const label = $('btnLabel');
+      const waves = $('waveBars');
+      const ring = $('outerRing');
+      const r1 = $('ripple1');
+      const r2 = $('ripple2');
+
+      if (s === 'idle') {
+        btn.disabled = false;
+        btn.style.background = 'linear-gradient(145deg, rgba(139,92,246,0.15), rgba(56,189,248,0.1))';
+        btn.style.borderColor = 'rgba(139,92,246,0.3)';
+        icon.classList.remove('hidden'); waves.classList.add('hidden');
+        label.textContent = 'Start'; label.className = 'text-[11px] font-semibold tracking-[0.2em] uppercase text-violet-400/80';
+        ring.style.background = 'transparent';
+        r1.classList.add('hidden'); r2.classList.add('hidden');
+        r1.classList.remove('anim-ripple'); r2.classList.remove('anim-ripple');
+        dot.className = 'w-1.5 h-1.5 rounded-full bg-gray-600 transition-colors duration-300';
+        txt.textContent = 'Disconnected'; txt.className = 'text-xs font-medium text-gray-500';
+        meter.classList.add('opacity-0'); meter.classList.remove('opacity-100');
+        $('meterBar').style.width = '0%';
+        $('duration').textContent = '0:00';
+      } else if (s === 'connecting') {
+        btn.disabled = true;
+        btn.style.background = 'linear-gradient(145deg, rgba(251,191,36,0.12), rgba(245,158,11,0.08))';
+        btn.style.borderColor = 'rgba(251,191,36,0.35)';
+        icon.classList.remove('hidden'); waves.classList.add('hidden');
+        label.textContent = '···'; label.className = 'text-[11px] font-semibold tracking-[0.2em] uppercase text-amber-400/80';
+        ring.style.background = 'radial-gradient(circle, rgba(251,191,36,0.06) 0%, transparent 70%)';
+        dot.className = 'w-1.5 h-1.5 rounded-full bg-amber-400 transition-colors duration-300 animate-pulse';
+        txt.textContent = 'Connecting…'; txt.className = 'text-xs font-medium text-amber-400';
+      } else if (s === 'connected') {
+        btn.disabled = false;
+        btn.style.background = 'linear-gradient(145deg, rgba(16,185,129,0.12), rgba(52,211,153,0.08))';
+        btn.style.borderColor = 'rgba(16,185,129,0.35)';
+        icon.classList.add('hidden'); waves.classList.remove('hidden');
+        label.textContent = 'Stop'; label.className = 'text-[11px] font-semibold tracking-[0.2em] uppercase text-emerald-400/80';
+        ring.style.background = 'radial-gradient(circle, rgba(16,185,129,0.08) 0%, transparent 70%)';
+        r1.classList.remove('hidden'); r2.classList.remove('hidden');
+        r1.classList.add('anim-ripple'); r2.classList.add('anim-ripple');
+        dot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400 transition-colors duration-300';
+        txt.textContent = 'Streaming'; txt.className = 'text-xs font-medium text-emerald-400';
+        meter.classList.remove('opacity-0'); meter.classList.add('opacity-100');
+        connectTime = Date.now();
+        startDurationTimer();
+      }
+    }
+
+    function startDurationTimer() {
+      stopDurationTimer();
+      durationTimer = setInterval(() => {
+        if (!connectTime) return;
+        const secs = Math.floor((Date.now() - connectTime) / 1000);
+        const m = Math.floor(secs / 60);
+        const s = secs % 60;
+        $('duration').textContent = `${m}:${s.toString().padStart(2, '0')}`;
+      }, 1000);
+    }
+    function stopDurationTimer() {
+      if (durationTimer) { clearInterval(durationTimer); durationTimer = null; }
+      connectTime = null;
+    }
+
+    // -----------------------------------------------------------------------
+    // Mic enumeration
+    // -----------------------------------------------------------------------
+    async function enumerateMics() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const mics = devices.filter(d => d.kind === 'audioinput');
+        const sel = $('micSelect');
+        sel.innerHTML = '<option value="">Default microphone</option>';
+        mics.forEach(mic => {
+          const opt = document.createElement('option');
+          opt.value = mic.deviceId;
+          opt.textContent = mic.label || `Microphone ${sel.options.length}`;
+          sel.appendChild(opt);
+        });
+      } catch (e) { log('Could not enumerate devices: ' + e.message); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Volume meter
+    // -----------------------------------------------------------------------
+    function startMeter(stream) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      audioCtx.createMediaStreamSource(stream).connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      function tick() {
+        analyser.getByteFrequencyData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        const pct = Math.min(100, (sum / data.length / 128) * 100);
+        $('meterBar').style.width = pct + '%';
+        meterRAF = requestAnimationFrame(tick);
+      }
+      tick();
+    }
+    function stopMeter() {
+      if (meterRAF) { cancelAnimationFrame(meterRAF); meterRAF = null; }
+      if (audioCtx) { audioCtx.close().catch(() => { }); audioCtx = null; }
+      analyser = null;
+      $('meterBar').style.width = '0%';
+    }
+
+    // -----------------------------------------------------------------------
+    // Toggle
+    // -----------------------------------------------------------------------
+    async function toggleConnection() {
+      if (state === 'idle') await connect();
+      else if (state === 'connected') disconnect();
+    }
+
+    // -----------------------------------------------------------------------
+    // Connect
+    // -----------------------------------------------------------------------
+    async function connect() {
+      setState('connecting');
+      log('Requesting microphone access…');
+
+      try {
+        const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 } };
+        const deviceId = $('micSelect').value;
+        if (deviceId) constraints.audio.deviceId = { exact: deviceId };
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        log('Microphone access granted');
+        $('permBanner').classList.add('hidden');
+        await enumerateMics();
+      } catch (e) {
+        log('Microphone denied: ' + e.message);
+        $('permBanner').classList.remove('hidden');
+        setState('idle');
+        return;
+      }
+
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${proto}//${location.host}/ws`;
+      log('Connecting WebSocket: ' + wsUrl);
+
+      try { ws = new WebSocket(wsUrl); } catch (e) { log('WebSocket failed: ' + e.message); cleanup(); return; }
+
+      ws.onopen = () => {
+        log('WebSocket connected');
+        keepaliveInterval = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+        }, 15000);
+      };
+      ws.onmessage = async (ev) => { try { await handleSignal(JSON.parse(ev.data)); } catch (e) { log('Bad message: ' + e.message); } };
+      ws.onerror = () => log('WebSocket error');
+      ws.onclose = (ev) => { log('WebSocket closed: ' + (ev.reason || ev.code)); if (state !== 'idle') cleanup(); };
+    }
+
+    // -----------------------------------------------------------------------
+    // Signaling
+    // -----------------------------------------------------------------------
+    async function handleSignal(msg) {
+      switch (msg.type) {
+        case 'offer': log('Received SDP offer'); await handleOffer(msg.sdp); break;
+        case 'answer':
+          log('Received SDP answer');
+          if (pc) await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+          break;
+        case 'ice':
+          log('Received ICE candidate');
+          if (pc && msg.candidate) {
+            try { await pc.addIceCandidate(new RTCIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid || '0', sdpMLineIndex: msg.sdpMLineIndex || 0 })); }
+            catch (e) { log('ICE add failed: ' + e.message); }
+          }
+          break;
+        case 'bye': log('Received bye'); cleanup(); break;
+        case 'ping': break;
+        default: log('Unknown: ' + msg.type);
+      }
+    }
+
+    async function handleOffer(sdp) {
+      log('Creating RTCPeerConnection…');
+      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+      if (localStream) localStream.getTracks().forEach(t => { pc.addTrack(t, localStream); log('Added track: ' + t.label); });
+
+      pc.onicecandidate = (ev) => {
+        if (ev.candidate && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ice', candidate: ev.candidate.candidate, sdpMid: ev.candidate.sdpMid, sdpMLineIndex: ev.candidate.sdpMLineIndex }));
+        }
+      };
+      pc.oniceconnectionstatechange = () => {
+        log('ICE: ' + pc.iceConnectionState);
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') { setState('connected'); startMeter(localStream); }
+        else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') { log('ICE lost'); cleanup(); }
+      };
+      pc.onconnectionstatechange = () => { log('PC: ' + pc.connectionState); if (pc.connectionState === 'failed') cleanup(); };
+
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      log('Remote description set');
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      log('Local description set (answer)');
+      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp })); log('Sent answer'); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Disconnect
+    // -----------------------------------------------------------------------
+    function disconnect() {
+      log('Stopping…');
+      if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'bye' })); log('Sent bye'); }
+      cleanup();
+    }
+
+    function cleanup() {
+      if (keepaliveInterval) { clearInterval(keepaliveInterval); keepaliveInterval = null; }
+      if (pc) { pc.onicecandidate = null; pc.oniceconnectionstatechange = null; pc.onconnectionstatechange = null; pc.close(); pc = null; }
+      if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; ws.close(); ws = null; }
+      if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+      stopMeter();
+      stopDurationTimer();
+      setState('idle');
+      log('Disconnected');
+    }
+
+    // -----------------------------------------------------------------------
+    // Switch mic
+    // -----------------------------------------------------------------------
+    async function switchMic() {
+      if (state !== 'connected') return;
+      const deviceId = $('micSelect').value;
+      log('Switching mic: ' + (deviceId || 'default'));
+      try {
+        const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 } };
+        if (deviceId) constraints.audio.deviceId = { exact: deviceId };
+        const newStream = await navigator.mediaDevices.getUserMedia(constraints);
+        const newTrack = newStream.getAudioTracks()[0];
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+        if (sender) { await sender.replaceTrack(newTrack); log('Track replaced: ' + newTrack.label); }
+        if (localStream) localStream.getTracks().forEach(t => t.stop());
+        localStream = newStream;
+        stopMeter(); startMeter(localStream);
+      } catch (e) { log('Switch mic failed: ' + e.message); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Init
+    // -----------------------------------------------------------------------
+    enumerateMics();
+    window.addEventListener('beforeunload', () => { if (state !== 'idle') disconnect(); });
+  </script>
+
+</body>
+
+</html>

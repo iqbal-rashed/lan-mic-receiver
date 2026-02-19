@@ -8,13 +8,22 @@ use std::sync::Arc;
 /// Use a virtual cable (e.g. VB-Cable) and select "CABLE Input" if you want
 /// other apps to see it as a microphone.
 pub struct AudioOutput {
-    _stream: cpal::Stream,
+    _stream: Option<cpal::Stream>,
     device_name: String,
 }
 
 impl AudioOutput {
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// Create a stopped placeholder (no active audio stream).
+    /// Used as a temporary during device switching.
+    pub fn stopped() -> Self {
+        Self {
+            _stream: None,
+            device_name: "(stopped)".to_string(),
+        }
     }
 
     /// Open the specified (or default) output device and start playing samples
@@ -67,7 +76,7 @@ impl AudioOutput {
         stream.play()?;
 
         Ok(Self {
-            _stream: stream,
+            _stream: Some(stream),
             device_name,
         })
     }

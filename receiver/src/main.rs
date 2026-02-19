@@ -22,6 +22,11 @@ pub enum TrayMessage {
 }
 
 fn main() -> iced::Result {
+    // Install default crypto provider to avoid panic in axum-server/rustls
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Ensure only one instance of the app is running
     let instance = SingleInstance::new(APP_INSTANCE_NAME).unwrap();
     if !instance.is_single() {

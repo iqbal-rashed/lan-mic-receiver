@@ -56,14 +56,14 @@ final class ConnectionViewModel: ObservableObject {
     private var connectTime: Date?
 
     // MARK: - Logger
-    private static let logger = Logger(subsystem: "com.lanmic.app", category: "ConnectionViewModel")
+    fileprivate static let logger = Logger(subsystem: "com.lanmic.app", category: "ConnectionViewModel")
 
     // MARK: - Constants
     private static let connectionTimeoutSeconds: TimeInterval = 15
 
     // MARK: - Init
 
-    nonisolated init() {
+    init() {
         // Load persisted values — must use a local then assign
         let savedIP = UserDefaults.standard.string(forKey: "lanmic_ip") ?? ""
         let savedPort = UserDefaults.standard.string(forKey: "lanmic_port") ?? "9001"
@@ -174,6 +174,9 @@ final class ConnectionViewModel: ObservableObject {
         statsTimer = nil
         connectTime = nil
 
+        // Send bye to notify receiver before disconnecting
+        signaling.sendBye()
+
         // Disable auto-reconnect BEFORE disconnecting to prevent race
         signaling.autoReconnect = false
         signaling.disconnect()
@@ -242,12 +245,9 @@ final class ConnectionViewModel: ObservableObject {
             lastError = error.localizedDescription
         }
         if state == .connected || state == .exchangingSDP || state == .iceConnecting {
+            // Full cleanup — same as user pressing Stop
+            stop()
             state = .failed
-            webRTC.close()
-            audio.deactivate()
-            statsTimer?.invalidate()
-            statsTimer = nil
-            connectTime = nil
         }
     }
 

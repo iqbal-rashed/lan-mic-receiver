@@ -36,7 +36,7 @@ final class AudioSessionManager {
         try session.setCategory(
             .playAndRecord,
             mode: .measurement,
-            options: [.allowBluetooth, .defaultToSpeaker, .mixWithOthers]
+            options: [.allowBluetoothHFP, .defaultToSpeaker, .mixWithOthers]
         )
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.02)  // 20 ms

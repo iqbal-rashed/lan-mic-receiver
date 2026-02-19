@@ -89,6 +89,11 @@ final class SignalingClient: NSObject {
         send(msg)
     }
 
+    func sendBye() {
+        let msg = SignalingMessage(type: "bye")
+        send(msg)
+    }
+
     private func send(_ message: SignalingMessage) {
         guard let data = try? JSONEncoder().encode(message),
               let text = String(data: data, encoding: .utf8)

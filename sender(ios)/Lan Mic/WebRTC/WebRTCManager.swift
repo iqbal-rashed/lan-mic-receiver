@@ -163,7 +163,11 @@ final class WebRTCManager: NSObject {
             logger.warning("addICECandidate called but no peer connection exists")
             return
         }
-        pc.add(iceCandidate)
+        pc.add(iceCandidate) { [weak self] error in
+            if let error {
+                self?.logger.warning("Failed to add ICE candidate: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Stats
