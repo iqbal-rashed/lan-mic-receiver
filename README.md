@@ -1,8 +1,11 @@
+<div align="center">
+<img src="https://raw.githubusercontent.com/iqbal-rashed/lan-mic-receiver/main/.github/icon.png" alt="LAN Mic Receiver" width="100" height="100">
+</div>
+<br/>
+
 # LAN Mic Receiver
 
 A real-time audio streaming application that turns your phone into a microphone for your PC/Mac over the local network.
-
-![LAN Mic Receiver](https://raw.githubusercontent.com/placeholder-image.png)
 
 ## Features
 - **Low Latency**: Uses WebRTC for sub-second delay.

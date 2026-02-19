@@ -2,6 +2,9 @@
 name = "lan-mic-webrtc-receiver"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["Rashed Iqbal"]
+description = "A real-time audio receiver for LAN Mic"
 
 [dependencies]
 anyhow = "1"
